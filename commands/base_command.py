@@ -212,7 +212,9 @@ class BaseCommand:
                         await self.bot.reply_to(message, f"<b>[ϟ] Antispam Wait {time_limit - (current_time - user.last_command_time):.0f} seconds</b>")
                         return
                     
-                    cards = Utils.extract_multiple_cards(message, self.cmd,limit=10)
+                    # Increase mass card limit for admins; keep 10 for others
+                    mass_limit = 200 if user.is_admin else 10
+                    cards = Utils.extract_multiple_cards(message, self.cmd, limit=mass_limit)
                     if not cards:
                         error_msg = f"<b>{self.gate.upper()}\nFormat: </b><code>/{self.cmd} cc|mm|yy|cvv\nLimit: 10 Cards"
                         await self.bot.reply_to(message, error_msg)
@@ -538,7 +540,8 @@ class BaseCommand:
                 await self.bot.reply_to(message, "<b>Invalid command specified.</b>")
                 return
             
-            if not user.is_premium:
+            # Allow both premium users and admins to use /check
+            if not (user.is_premium or user.is_admin):
                 await self.bot.reply_to(message, "<b>Not Authorized.</b>")
                 return
             
@@ -560,7 +563,8 @@ class BaseCommand:
                 return
             
             original = len(cards)
-            if len(cards) > 200:
+            # Admins can process full file; non-admins limited to 200 cards
+            if len(cards) > 200 and not user.is_admin:
                 cards = cards[:200]
 
             response_msg = await self.bot.reply_to(message, f"<b>Found {original} valid cards. \nWe will only process {len(cards)}\nInitializing check for /{command}!</b>")

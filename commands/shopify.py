@@ -1343,8 +1343,9 @@ def register_resource_commands(bot):
 
         results = []
 
-        user_site_list = get_user_shopify_sites(user.id)
-        user_proxy_list = get_user_proxies(user.id)
+        # Use Telegram ID consistently for Shopify site/proxy lookups
+        user_site_list = get_user_shopify_sites(message.from_user.id)
+        user_proxy_list = get_user_proxies(message.from_user.id)
 
         if not user_site_list:
             await bot.reply_to(message, "<b>❌ No Shopify site set!\nUse /shopify for more info.</b>")
