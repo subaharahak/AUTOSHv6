@@ -989,10 +989,11 @@ def register_resource_commands(bot):
         response += "<code>/sh api[number] cc|mm|yy|cvv</code> - <b>Check cards 🙌</b>\n\n"
 
         response += "<code>/addsh</code> - <b>Add Shopify site</b>\n"
+        response += "<code>/addshtxt</code> - <b>Add multiple Shopify sites from .txt or text</b>\n"
 
         response += "<code>/rmsh</code> - <b>Remove Shopify site</b>\n"
         response += "<code>/listsh</code> - <b>List Shopify sites</b>\n\n"
-
+        response += "<code>/msh</code> - <b>Mass check Shopify cards from .txt or text</b>\n\n"
 
         await bot.reply_to(message, response)
 
@@ -1003,6 +1004,164 @@ def register_resource_commands(bot):
             add_user(message.from_user.id)
             user = get_user(message.from_user.id)
         return user
+    
+    async def _extract_sites_from_text(text: str):
+        """Extract possible site URLs/domains from arbitrary text for addshtxt."""
+        if not text:
+            return []
+        candidates = set()
+        # Full URLs
+        for match in re.findall(r'(https?://[^\s]+)', text):
+            candidates.add(match.strip())
+        # Bare domains
+        for token in re.split(r'[\s,]+', text):
+            token = token.strip()
+            if not token:
+                continue
+            if any(t in token for t in ['http://', 'https://']):
+                continue
+            if '.' in token and not token.startswith('#'):
+                candidates.add(token)
+        return list(candidates)
+    
+    @bot.message_handler(commands=['addshtxt'])
+    async def add_shopify_from_text_handler(message):
+        """
+        Add multiple Shopify sites from a replied .txt file or large pasted text.
+        Only sites using Shopify Payments gateway are saved.
+        """
+        try:
+            if not await ensure_user_exists(message):
+                return
+            user_sites = get_user_shopify_sites(message.from_user.id)
+            user_proxies = get_user_proxies(message.from_user.id)
+            
+            if len(user_proxies) <= 0:
+                await bot.reply_to(message, "<b>❌ Add proxy first.\nHit /shopify for more info!</b>")
+                return
+            
+            # Get text either from replied document or replied text / current message
+            source_text = ""
+            reply = message.reply_to_message
+            if reply and getattr(reply, "document", None):
+                try:
+                    file_info = await bot.get_file(reply.document.file_id)
+                    file_path = file_info.file_path
+                    file = await bot.download_file(file_path)
+                    source_text = file.decode('utf-8', errors='ignore')
+                except Exception as e:
+                    await bot.reply_to(message, f"❌ Failed to read file: {str(e)}")
+                    return
+            elif reply and getattr(reply, "text", None):
+                source_text = reply.text
+            else:
+                # Fallback to current message text (after removing command)
+                source_text = message.text.partition(' ')[2]
+            
+            sites = await _extract_sites_from_text(source_text)
+            if not sites:
+                await bot.reply_to(message, "❌ No valid sites/domains found in the provided text.")
+                return
+            
+            # Respect maximum site limit (10 per user)
+            existing_sites = get_user_shopify_sites(message.from_user.id)
+            remaining_slots = max(0, 10 - len(existing_sites))
+            if remaining_slots <= 0:
+                await bot.reply_to(message, "❌ You have reached the limit of 10 Shopify sites.\nRemove one before adding new ones.")
+                return
+            
+            header = (f"🔍 <b>Processing {len(sites)} site(s)...</b>\n"
+                      f"Only sites with <b>Shopify Payments</b> will be saved.\n\n")
+            status_msg = await bot.reply_to(message, header)
+            log_text = header
+            MAX_LEN = 3500
+            
+            added_count = 0
+            skipped_count = 0
+            
+            for raw_site in sites:
+                if added_count >= remaining_slots:
+                    log_text += "\n⚠️ Site limit reached (10). Remaining sites were skipped.\n"
+                    break
+                
+                url = raw_site.lower()
+                domain = extract_domain_name(url)
+                if not domain:
+                    line = f"❌ <code>{raw_site}</code> → Invalid domain\n"
+                    skipped_count += 1
+                else:
+                    # Skip duplicates
+                    current_sites = get_user_shopify_sites(message.from_user.id)
+                    if any(site.url == domain for site in current_sites):
+                        line = f"⚠️ <code>{domain}</code> → Already in your list\n"
+                        skipped_count += 1
+                    else:
+                        # Verify it's a Shopify site and gateway is Shopify Payments
+                        success, site_info = await verify_shopify_url(url, 0.1)
+                        if not success:
+                            line = f"❌ <code>{domain}</code> → {site_info}\n"
+                            skipped_count += 1
+                        else:
+                            gateway_name = (site_info.get('gateway') or '').lower()
+                            if 'shopify' not in gateway_name:
+                                line = f"⚠️ <code>{domain}</code> → Not Shopify Payments, skipped\n"
+                                skipped_count += 1
+                            else:
+                                if add_shopify_site(message.from_user.id, domain, site_info['variant_id']):
+                                    line = f"✅ <code>{domain}</code> → Added (Shopify Payments)\n"
+                                    added_count += 1
+                                else:
+                                    line = f"❌ <code>{domain}</code> → Failed to save in database\n"
+                                    skipped_count += 1
+                
+                # Update log and edit message, creating new messages if text grows too long
+                if len(log_text) + len(line) > MAX_LEN:
+                    try:
+                        await bot.edit_message_text(
+                            log_text,
+                            chat_id=status_msg.chat.id,
+                            message_id=status_msg.message_id,
+                            parse_mode='HTML'
+                        )
+                    except Exception:
+                        pass
+                    status_msg = await bot.send_message(
+                        message.chat.id,
+                        "<b>Continuing site import...</b>",
+                        parse_mode='HTML'
+                    )
+                    log_text = ""
+                
+                log_text += line
+                try:
+                    await bot.edit_message_text(
+                        log_text,
+                        chat_id=status_msg.chat.id,
+                        message_id=status_msg.message_id,
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    pass
+            
+            summary = (f"\n\n<b>Done.</b>\n"
+                       f"✅ Added: {added_count}\n"
+                       f"⚠️/❌ Skipped: {skipped_count}\n")
+            if len(log_text) + len(summary) <= MAX_LEN:
+                log_text += summary
+                try:
+                    await bot.edit_message_text(
+                        log_text,
+                        chat_id=status_msg.chat.id,
+                        message_id=status_msg.message_id,
+                        parse_mode='HTML'
+                    )
+                except Exception:
+                    await bot.send_message(message.chat.id, summary, parse_mode='HTML')
+            else:
+                await bot.send_message(message.chat.id, summary, parse_mode='HTML')
+        
+        except Exception as e:
+            print(e)
     
     @bot.message_handler(commands=['addsh'])
     async def add_shopify_handler(message):
@@ -1127,6 +1286,211 @@ def register_resource_commands(bot):
             response += f"   Variant ID: {site.variant_id}\n\n"
 
         await bot.reply_to(message, response)
+
+    @bot.message_handler(commands=['msh'])
+    async def mass_shopify_from_text_or_file(message):
+        """
+        Mass check Shopify cards from a replied .txt file or large pasted text.
+        Uses the same logic as /sh mass, but works on replied content.
+        """
+        if not await ensure_user_exists(message):
+            return
+
+        user = get_user(message.from_user.id)
+        if not user:
+            await bot.reply_to(message, "<b>Register urself</b>")
+            return
+
+        reply = message.reply_to_message
+        if not reply:
+            await bot.reply_to(message, "<b>Reply to a .txt file or a message containing cards.</b>")
+            return
+
+        cards = []
+        # If reply is a document (.txt)
+        if getattr(reply, "document", None):
+            try:
+                file_info = await bot.get_file(reply.document.file_id)
+                file_path = file_info.file_path
+                file = await bot.download_file(file_path)
+                content = file.decode('utf-8', errors='ignore')
+                cards = re.findall(r'\b\d{12,19}\|[0-1][0-9]\|[2-9][0-9]\|[0-9]{3,4}\b', content)
+            except Exception as e:
+                await bot.reply_to(message, f"<b>Failed to read file:</b> {str(e)}")
+                return
+        elif getattr(reply, "text", None):
+            # Use existing multiple card extractor on the replied text
+            fake_msg = reply
+            cards_parsed = Utils.extract_multiple_cards(fake_msg, 'msh', limit=200)
+            if cards_parsed:
+                cards = [f"{cc}|{mes}|{ano}|{cvv}" for (cc, mes, ano, cvv) in cards_parsed]
+        else:
+            await bot.reply_to(message, "<b>Reply to a .txt file or a text message containing cards.</b>")
+            return
+
+        if not cards:
+            await bot.reply_to(message, "<b>No valid cards found in the replied content.</b>")
+            return
+
+        original = len(cards)
+        if len(cards) > 200:
+            cards = cards[:200]
+
+        response_msg = await bot.reply_to(
+            message,
+            f"<b>Found {original} valid cards. \nWe will only process {len(cards)}\nInitializing Shopify mass check!</b>"
+        )
+
+        results = []
+
+        user_site_list = get_user_shopify_sites(user.id)
+        user_proxy_list = get_user_proxies(user.id)
+
+        if not user_site_list:
+            await bot.reply_to(message, "<b>❌ No Shopify site set!\nUse /shopify for more info.</b>")
+            return
+        if not user_proxy_list:
+            await bot.reply_to(message, "<b>❌ No proxy set!\nUse /shopify for more info.</b>")
+            return
+
+        # Handle api[number] selection from command text if present
+        user_site = user_site_list
+        if 'api' in message.text.lower():
+            apiId = re.search(r'api\d+', message.text.lower())
+            if not apiId:
+                await bot.reply_to(message, f"<b>❌ Invalid Shopify API format!\nUse /shopify for more info.</b>")
+                return
+
+            apiId = apiId.group(0)
+            site_num = int(apiId.replace('api', ''))
+            if len(list(user_site_list)) >= site_num:
+                user_site = user_site_list[site_num - 1]
+            else:
+                await bot.reply_to(message, f"<b>❌ No Shopify found with the api{site_num} set!\nUse /shopify for more info.</b>")
+                return
+        else:
+            # Default to first site if user doesn't specify api[number]
+            user_site = user_site_list[0]
+
+        from gateways.autoShopify import process_card as sh_process_card
+
+        for i, card in enumerate(cards, 1):
+            cc, mes, ano, cvv = card.split('|')
+            start_time = time.time()
+
+            try:
+                last_results = "\n\n".join(results[-10:])
+                await bot.edit_message_text(
+                    f"<b>Checking ({i}/{len(cards)})</b>\n"
+                    f"<code>{cc}|{mes}|{ano}|{cvv}</code>\n\n"
+                    f"Previous Results:\n" + last_results,
+                    chat_id=message.chat.id,
+                    message_id=response_msg.message_id,
+                    parse_mode='HTML'
+                )
+            except Exception:
+                pass
+
+            try:
+                res0 = await sh_process_card(cc, mes, ano, cvv, user_site, user_proxy_list)
+                # Reuse same formatting logic as mass handler in BaseCommand
+                if isinstance(res0, tuple):
+                    if len(res0) == 5:
+                        success, msg, gateway, amount, currency = res0
+                        if success:
+                            status = "✅ [CHARGED]"
+                            result = f"Charged {amount} {currency} via {gateway}"
+                        else:
+                            status = "❌"
+                            result = f"{msg} - Gateway: {gateway}"
+                    elif len(res0) == 3:
+                        success, msg, gateway = res0
+                        if success:
+                            if 'Incorrect Zip' in msg:
+                                status = "✅ [CVV LIVE]"
+                                result = f"Incorrect Zip - Gateway: {gateway}"
+                            elif any(x in msg.lower() for x in ['insuff', 'invalid_cvc', 'incorrect_cvc']):
+                                status = "✅"
+                                result = f"{msg} - Gateway: {gateway}"
+                            else:
+                                status = "✅"
+                                result = f"{msg} - Gateway: {gateway}"
+                        elif "Error Processing" in msg:
+                            status  = "⚠️"
+                            result = f"Proxy or Site Issue! - Site: {gateway}"
+                        else:
+                            if '3D' in msg:
+                                status = "❌ [3DS]"
+                                result = f"3D Secured - Gateway: {gateway}"
+                            else:
+                                status = "❌"
+                                result = f"{msg} - Gateway: {gateway}"
+                    else:
+                        success, result = res0
+                        status = "✅" if success else "❌"
+                else:
+                    success = bool(res0)
+                    result = str(res0)
+                    status = "✅" if success else "❌"
+
+                time_taken = time.time() - start_time
+
+                results.append(
+                    f"{i}. {status} <code>{cc}|{mes}|{ano}|{cvv}</code>\n"
+                    f"   └ {result}\n"
+                    f"   ⌚ Time: {time_taken:.2f}s"
+                )
+            except Exception as e:
+                results.append(f"{i}. ⚠️ <code>{cc}|{mes}|{ano}|{cvv}</code>\n   └ Error: {str(e)}")
+
+        live_count = sum(1 for r in results if "✅" in r)
+        dead_count = sum(1 for r in results if "❌" in r)
+        error_count = sum(1 for r in results if "⚠️" in r)
+
+        final_res = (
+            f"<b>Shopify Mass Check Complete</b>\n"
+            f"<b>Total:</b> {len(cards)} | ✅ {live_count} | ❌ {dead_count} | ⚠️ {error_count}\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            + "\n\n".join(results)
+        )
+
+        try:
+            await bot.edit_message_text(
+                final_res,
+                chat_id=message.chat.id,
+                message_id=response_msg.message_id,
+                parse_mode='HTML'
+            )
+        except Exception:
+            pass
+
+        # Send highlights similar to BaseCommand MASS
+        try:
+            charged = [r for r in results if "[CHARGED]" in r]
+            cvv_live = [r for r in results if "[CVV LIVE]" in r]
+            three_ds = [r for r in results if "[3DS]" in r]
+            live_simple = [
+                r for r in results
+                if "✅" in r and "[CHARGED]" not in r and "[CVV LIVE]" not in r
+            ]
+            highlight_parts = []
+            if charged:
+                highlight_parts.append("<b>💳 Charged:</b>\n" + "\n\n".join(charged[-10:]))
+            if cvv_live:
+                highlight_parts.append("<b>✅ CVV Live:</b>\n" + "\n\n".join(cvv_live[-10:]))
+            if live_simple:
+                highlight_parts.append("<b>✅ Live:</b>\n" + "\n\n".join(live_simple[-10:]))
+            if three_ds:
+                highlight_parts.append("<b>❌ 3DS:</b>\n" + "\n\n".join(three_ds[-10:]))
+            if highlight_parts:
+                highlight_msg = "<b>Shopify Mass Highlights</b>\n\n" + "\n\n".join(highlight_parts)
+                await bot.send_message(
+                    message.chat.id,
+                    highlight_msg,
+                    parse_mode='HTML'
+                )
+        except Exception:
+            pass
 
     @bot.message_handler(commands=['addproxy'])
     async def add_proxy_handler(message):

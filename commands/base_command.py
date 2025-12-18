@@ -320,6 +320,35 @@ class BaseCommand:
                         )
                     except Exception as e:
                         self.logger.error(f"Error updating final message: {str(e)}")
+
+                    # Also send a separate highlight message for live/charged/3DS etc.
+                    try:
+                        charged = [r for r in results if "[CHARGED]" in r]
+                        cvv_live = [r for r in results if "[CVV LIVE]" in r]
+                        three_ds = [r for r in results if "[3DS]" in r]
+                        live_simple = [
+                            r for r in results
+                            if "✅" in r and "[CHARGED]" not in r and "[CVV LIVE]" not in r
+                        ]
+                        highlight_parts = []
+                        if charged:
+                            highlight_parts.append("<b>💳 Charged:</b>\n" + "\n\n".join(charged[-10:]))
+                        if cvv_live:
+                            highlight_parts.append("<b>✅ CVV Live:</b>\n" + "\n\n".join(cvv_live[-10:]))
+                        if live_simple:
+                            highlight_parts.append("<b>✅ Live:</b>\n" + "\n\n".join(live_simple[-10:]))
+                        if three_ds:
+                            highlight_parts.append("<b>❌ 3DS:</b>\n" + "\n\n".join(three_ds[-10:]))
+                        if highlight_parts:
+                            highlight_msg = "<b>Mass Check Highlights</b>\n\n" + "\n\n".join(highlight_parts)
+                            await self.bot.send_message(
+                                message.chat.id,
+                                highlight_msg,
+                                parse_mode='HTML'
+                            )
+                    except Exception as e:
+                        self.logger.error(f"Error sending highlight message: {str(e)}")
+
                     return
                 
                 # Other gates!!
