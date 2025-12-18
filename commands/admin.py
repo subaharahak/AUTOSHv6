@@ -10,7 +10,7 @@ import os
 
 from .base_command import BaseCommand
 
-ADMIN_ID = 'Your Chat Id'
+ADMIN_ID = '5103348494'
 
 def register_admin_commands(bot: AsyncTeleBot):
     @bot.message_handler(func=lambda message: message.text and message.text[0] in ['/', '?', '.'] and
@@ -419,3 +419,4 @@ Examples:
         with open(filename, 'rb') as f:
             await bot.send_document(message.chat.id, f, caption=f"📊 Database Query Results: {query_type}")
         os.remove(filename)
+
