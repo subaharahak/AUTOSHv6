@@ -3,7 +3,7 @@ from database import get_user, add_user
 import os
 from datetime import datetime
 
-ADMIN_ID = 5750284541
+ADMIN_ID = 5103348494
 
 def register_me_command(bot: AsyncTeleBot):
     @bot.message_handler(commands=['info'])
@@ -60,3 +60,4 @@ def register_me_command(bot: AsyncTeleBot):
         )
 
         await bot.reply_to(message, response, parse_mode='HTML')
+
